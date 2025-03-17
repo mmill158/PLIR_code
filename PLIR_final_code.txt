@@ -1,0 +1,249 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <SD.h>
+#include <Wire.h>
+#include <Adafruit_MLX90614.h>
+#include <DHT.h>
+
+// Wi-Fi credentials
+const char* ssid = "ESP32-Robot";
+const char* password = "12345678";
+
+WebServer server(80);
+
+// Motor control pins
+#define IN1 16
+#define IN2 17
+#define IN3 18
+#define IN4 8
+
+// Sensor Pins
+#define DHT_PIN 3
+#define DHT_TYPE DHT22
+#define TRIG1 37
+#define ECHO1 41
+#define TRIG2 35
+#define ECHO2 38
+#define CURRENT_PIN_POS 4
+#define CURRENT_PIN_NEG 5
+#define SD_CS 11
+
+#define NUM_READINGS 10 
+
+bool sdOK = false;
+
+DHT dht(DHT_PIN, DHT_TYPE);
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+File logFile;
+
+enum RobotState { IDLE, MOVING_FORWARD, MOVING_BACKWARD, STOPPED };
+RobotState currentState = IDLE;
+
+void stopMotors() {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+    currentState = STOPPED;
+    Serial.println("STATE: STOPPED");
+}
+
+void moveForward() {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, HIGH);
+    currentState = MOVING_FORWARD;
+    Serial.println("STATE: MOVING_FORWARD");
+}
+
+void moveBackward() {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    currentState = MOVING_BACKWARD;
+    Serial.println("STATE: MOVING_BACKWARD");
+}
+
+float getDistance(int trigPin, int echoPin) {
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+    long duration = pulseIn(echoPin, HIGH, 40000);
+    if (duration == 0) return -1;  
+    float distance = duration * 0.034 / 2;
+    return (distance > 0 && distance <= 400) ? distance : -1;  
+}
+
+#define NUM_CURRENT_READINGS 10  
+float currentReadings[NUM_CURRENT_READINGS] = { 0 };
+int currentIndex = 0;
+
+#define NUM_SAMPLES 20  
+
+float readCurrent() {
+    float sumCurrent = 0;
+
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        int rawPos = analogRead(CURRENT_PIN_POS);
+        int rawNeg = analogRead(CURRENT_PIN_NEG);
+        float vPos = (rawPos * 3.3) / 4095.0;
+        float vNeg = (rawNeg * 3.3) / 4095.0;
+        float voltageDiff = vPos - vNeg;
+        sumCurrent += fabs(voltageDiff * 25.0);  
+        delayMicroseconds(200);  
+    }
+
+    return sumCurrent / NUM_SAMPLES;  
+}
+
+
+void logData(const char* filename, String data) {
+    logFile = SD.open(filename, FILE_APPEND);
+    if (logFile) {
+        logFile.println(data);
+        logFile.close();
+    }
+}
+
+
+float dhtTempArr[NUM_READINGS] = { 0 };
+float dhtHumidityArr[NUM_READINGS] = { 0 };
+float mlxTempArr[NUM_READINGS] = { 0 };
+float mlxAmbientArr[NUM_READINGS] = { 0 };
+float currentArr[NUM_READINGS] = { 0 };
+float distanceFrontArr[NUM_READINGS] = { 0 };
+float distanceBackArr[NUM_READINGS] = { 0 };
+
+int bufferIndex = 0;  
+
+void handleSensorData() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    float distanceFront = getDistance(TRIG1, ECHO1);
+    float distanceBack = getDistance(TRIG2, ECHO2);
+    float dhtTemp = dht.readTemperature();
+    float dhtHumidity = dht.readHumidity();
+    float mlxTemp = mlx.readObjectTempC();
+    float mlxAmbient = mlx.readAmbientTempC();
+    float current = readCurrent();
+
+    if (isnan(dhtTemp)) dhtTemp = -99.0;
+    if (isnan(dhtHumidity)) dhtHumidity = -99.0;
+    if (isnan(mlxTemp)) mlxTemp = -99.0;
+    if (isnan(mlxAmbient)) mlxAmbient = -99.0;
+    if (isnan(current)) current = -99.0;
+    if (distanceFront < 0) distanceFront = -1.0;
+    if (distanceBack < 0) distanceBack = -1.0;
+
+    dhtTempArr[bufferIndex] = dhtTemp;
+    dhtHumidityArr[bufferIndex] = dhtHumidity;
+    mlxTempArr[bufferIndex] = mlxTemp;
+    mlxAmbientArr[bufferIndex] = mlxAmbient;
+    currentArr[bufferIndex] = current;
+    distanceFrontArr[bufferIndex] = distanceFront;
+    distanceBackArr[bufferIndex] = distanceBack;
+
+    bufferIndex = (bufferIndex + 1) % NUM_READINGS;  
+
+    float avgDhtTemp = 0, avgDhtHumidity = 0, avgMlxTemp = 0;
+    float avgMlxAmbient = 0, avgCurrent = 0, avgDistanceFront = 0, avgDistanceBack = 0;
+
+    for (int i = 0; i < NUM_READINGS; i++) {
+        avgDhtTemp += dhtTempArr[i];
+        avgDhtHumidity += dhtHumidityArr[i];
+        avgMlxTemp += mlxTempArr[i];
+        avgMlxAmbient += mlxAmbientArr[i];
+        avgCurrent += currentArr[i];
+    }
+
+    avgDhtTemp /= NUM_READINGS;
+    avgDhtHumidity /= NUM_READINGS;
+    avgMlxTemp /= NUM_READINGS;
+    avgMlxAmbient /= NUM_READINGS;
+    avgCurrent /= NUM_READINGS;
+    avgDistanceFront = distanceFront;
+    avgDistanceBack = distanceBack;
+
+    if (distanceFront < 25 || distanceBack < 25)
+    {
+        stopMotors();
+    }
+
+    String stateString;
+    switch (currentState) {
+    case MOVING_FORWARD: stateString = "Moving Forward"; break;
+    case MOVING_BACKWARD: stateString = "Moving Backward"; break;
+    case STOPPED: stateString = "Stopped"; break;
+    default: stateString = "Idle";
+    }
+
+    String json = "{";
+    json += "\"state\":\"" + stateString + "\",";
+    json += "\"dhtTemp\":" + String(avgDhtTemp) + ",";
+    json += "\"dhtHumidity\":" + String(avgDhtHumidity) + ",";
+    json += "\"mlxTemp\":" + String(avgMlxTemp) + ",";
+    json += "\"mlxAmbient\":" + String(avgMlxAmbient) + ",";
+    json += "\"current\":" + String(avgCurrent) + ",";
+    json += "\"distanceFront\":" + String(avgDistanceFront) + ",";
+    json += "\"distanceBack\":" + String(avgDistanceBack);
+    json += "}";
+
+    server.send(200, "application/json", json);
+}
+
+
+void handleForward() { server.sendHeader("Access-Control-Allow-Origin", "*"); moveForward(); server.send(200, "text/plain", "Moving forward"); }
+void handleBackward() { server.sendHeader("Access-Control-Allow-Origin", "*"); moveBackward(); server.send(200, "text/plain", "Moving backward"); }
+void handleStop() { server.sendHeader("Access-Control-Allow-Origin", "*"); stopMotors(); server.send(200, "text/plain", "Motors stopped"); }
+
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+
+    WiFi.softAP(ssid, password);
+    Serial.println("ESP32 Access Point started");
+    Serial.print("AP IP Address: ");
+    Serial.println(WiFi.softAPIP());
+
+    dht.begin();
+
+    Wire.begin(20, 19);
+    mlx.begin();
+
+    SPI.begin(12, 14, 13, SD_CS);
+    Serial.println("Initializing SD card...");
+    if (!SD.begin(SD_CS)) {
+        Serial.println("Error: SD Card initialization failed!");
+        sdOK = false;
+    }
+    else {
+        Serial.println("SD Card initialized successfully.");
+        sdOK = true;
+    }
+
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+    pinMode(TRIG1, OUTPUT);
+    pinMode(ECHO1, INPUT);
+    pinMode(TRIG2, OUTPUT);
+    pinMode(ECHO2, INPUT);
+
+    server.on("/stop", handleStop);
+    server.on("/forward", handleForward);
+    server.on("/backward", handleBackward);
+    server.on("/sensors", handleSensorData);
+    server.begin();
+}
+
+void loop() {
+    server.handleClient();
+}
