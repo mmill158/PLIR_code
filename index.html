@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Powerline Inspection Robot Control</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f4; display: flex; justify-content: center; }
+        .container { display: flex; width: 90%; max-width: 1200px; margin-top: 20px; }
+        .left-section, .right-section { padding: 20px; }
+        .left-section { width: 50%; text-align: center; }
+        .right-section { width: 50%; text-align: left; background: white; padding: 20px; border-radius: 10px; box-shadow: 2px 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; }
+        .controls { margin-top: 20px; }
+        button { font-size: 18px; padding: 10px 20px; margin: 10px; border: none; cursor: pointer; border-radius: 5px; }
+        .forward { background-color: #4CAF50; color: white; }
+        .backward { background-color: #f44336; color: white; }
+        .stop { background-color: #555; color: white; }
+        .status { margin-top: 20px; font-size: 20px; font-weight: bold; }
+        #videoFeed { width: 90%; max-width: 600px; margin-top: 20px; border: 2px solid black; }
+        .sensor-data p { font-size: 18px; margin: 5px 0; }
+        #warning { margin-top: 10px; padding: 5px; font-weight: bold; text-align: center; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="left-section">
+            <h1>Powerline Inspection Robot</h1>
+            <img id="videoFeed" src="http://192.168.4.2:81/stream" crossorigin="">
+	    <!-- ESP32-CAM Stream -->
+            <div class="controls">
+                <button class="forward" onclick="sendCommand('forward')">Forward</button>
+                <button class="backward" onclick="sendCommand('backward')">Backward</button>
+                <button class="stop" onclick="sendCommand('stop')">Stop</button>
+            </div>
+            <div class="status" id="status">Status: Idle</div>
+        </div>
+        
+        <div class="right-section">
+            <h2>Sensor Data</h2>
+            <p>Internal Temperature: <span id="dhtTemp">--</span> °F</p>
+            <p>Humidity: <span id="dhtHumidity">--</span> %</p>
+            <p>Wire Temperature: <span id="mlxTemp">--</span> °F</p>
+            <p>Ambient Temperature: <span id="mlxAmbient">--</span> °F</p>
+            <p>Current: <span id="current">--</span> A</p>
+            <p>Front Distance: <span id="distanceFront">--</span> inches</p>
+            <p>Back Distance: <span id="distanceBack">--</span> inches</p>
+            <p id="warning" style="background-color: green; color: white; padding: 10px;">Safe Distance</p>
+        </div>
+    </div>
+
+    <script>
+        const ESP32_IP = "http://192.168.4.1"; // Main ESP32 controlling motors & sensors
+        const CAM_IP = "http://192.168.4.2:81/stream"; // ESP32-CAM for video feed
+        document.getElementById("videoFeed").src = `${CAM_IP}`;
+
+        function sendCommand(command) {
+            fetch(`${ESP32_IP}/${command}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+                    console.log(command + " sent");
+                })
+                .catch(error => console.error("Error:", error));
+        }
+
+        function updateSensors() {
+            fetch(`${ESP32_IP}/sensors`)
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Received Sensor Data:", data);
+
+                    if (!data) {
+                        console.error("No data received from sensors.");
+                        return;
+                    }
+
+                    function cToF(celsius) { return (celsius * 9/5) + 32; }
+                    function cmToInches(cm) { return cm / 2.54; }
+
+                    let distanceFront = data.distanceFront > 0 ? cmToInches(data.distanceFront).toFixed(2) : "--";
+                    let distanceBack = data.distanceBack > 0 ? cmToInches(data.distanceBack).toFixed(2) : "--";
+
+                    document.getElementById("dhtTemp").innerText = data.dhtTemp ? cToF(data.dhtTemp).toFixed(2) : "--";
+                    document.getElementById("dhtHumidity").innerText = data.dhtHumidity ? data.dhtHumidity.toFixed(2) : "--";
+                    document.getElementById("mlxTemp").innerText = data.mlxTemp ? cToF(data.mlxTemp).toFixed(2) : "--";
+                    document.getElementById("mlxAmbient").innerText = data.mlxAmbient ? cToF(data.mlxAmbient).toFixed(2) : "--";
+                    document.getElementById("current").innerText = data.current ? data.current.toFixed(2) : "--";
+                    document.getElementById("distanceFront").innerText = distanceFront;
+                    document.getElementById("distanceBack").innerText = distanceBack;
+                    document.getElementById("status").innerText = "Status: " + (data.state ? data.state : "Idle");
+
+                    let warningElement = document.getElementById("warning");
+                    if ((data.distanceFront > 0 && data.distanceFront < 15) || (data.distanceBack > 0 && data.distanceBack < 15)) {
+                        warningElement.style.backgroundColor = "red";
+                        warningElement.innerText = "Warning: Object Too Close!";
+                    } else {
+                        warningElement.style.backgroundColor = "green";
+                        warningElement.innerText = "Safe Distance";
+                    }
+                })
+                .catch(error => {
+                    console.error("Error fetching sensor data:", error);
+                });
+        }
+
+        setInterval(updateSensors, 3000); // Update every 3 seconds
+    </script>
+</body>
+</html>
